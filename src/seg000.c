@@ -583,6 +583,22 @@ int process_key() {
 	if (rem_min != 0 && Kid.alive > 6 && (control_shift || key == SDL_SCANCODE_RETURN)) {
 		key = SDL_SCANCODE_A | WITH_CTRL; // Ctrl+A
 	}
+#ifdef __GBA__
+	// On GBA the death "Press Button to Continue" sequence can stall before
+	// Kid.alive reaches the >6 "ready" state above: play_kid() only advances
+	// Char.alive on frames where check_sound_playing() is false, and the GBA
+	// SFX voices can read as still-playing (see gba_sound_bridge.c), so the
+	// normal restart never arms and the body never reaches its resting frame.
+	// Let the Start button (mapped to Enter) restart the moment the Kid is
+	// actually dead (alive >= 0). After the level reloads the Kid is alive
+	// again (alive == -1), so holding Start restarts exactly once, not in a
+	// loop. The persistent keystate is used instead of the single-shot `key`
+	// because the latter can be consumed before we get here.
+	else if (rem_min != 0 && Kid.alive >= 0 && current_level != 15 &&
+	         (key_states[SDL_SCANCODE_RETURN] & KEYSTATE_HELD)) {
+		key = SDL_SCANCODE_A | WITH_CTRL; // Ctrl+A
+	}
+#endif
 #ifdef USE_REPLAY
 	if (recording) key_press_while_recording(&key);
 	else if (replaying) key_press_while_replaying(&key);
