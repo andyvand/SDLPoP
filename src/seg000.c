@@ -176,7 +176,6 @@ void init_game_main() {
 	init_lighting();
 #endif
 	load_all_sounds();
-
 	hof_read();
 	show_splash(); // added
 	start_game();
@@ -929,6 +928,28 @@ void draw_game_frame() {
 				need_redraw_because_flipped = 0;
 				redraw_screen(0);
 			} else {
+#ifdef __GBA__
+				/* The GBA front-end has no separate offscreen/onscreen surface:
+				   make_offscreen_buffer() aliases onscreen_surface_, and
+				   gba_present_surface() copies the ENTIRE camera window to VRAM
+				   every frame. SDLPoP's incremental renderer wipes dirty tiles to
+				   black and redraws only those tiles, relying on the desktop
+				   dirty-rectangle copy (copy_screen_rect of `drects` only) to keep
+				   the display correct while the shared buffer accumulates
+				   over-cleared regions outside the dirty rects. On GBA the whole
+				   buffer is displayed, so those over-cleared regions show as black
+				   and peels propagate them (the "black blocks/trail" behind the
+				   moving prince). Redraw the whole room every frame so the single
+				   buffer is always complete. This is the same full-room draw the
+				   game already performs on every room entry.
+				   NOTE: redraw_screen() ends by setting exit_room_timer = 2, which
+				   makes exit_room() a no-op for 2 frames. Calling it every frame would
+				   permanently freeze room transitions (prince can never leave a room),
+				   so save and restore the timer around the redraw. */
+				int saved_exit_room_timer = exit_room_timer;
+				redraw_screen(0);
+				exit_room_timer = saved_exit_room_timer;
+#else
 				memset(&table_counts, 0, sizeof(table_counts));
 				draw_moving();
 				draw_tables();
@@ -946,6 +967,7 @@ void draw_game_frame() {
 					flip_screen(offscreen_surface);
 				}
 				drects_count = 0;
+#endif
 			}
 		}
 	}
@@ -1684,6 +1706,17 @@ void load_more_opt_graf(const char* filename) {
 	// stub
 	dat_shpl_type area;
 	dat_type* dathandle = NULL;
+#ifdef __GBA__
+	/* These optgraf sprites belong to the environment chtab (palette row 5).
+	   load_one_optgraf -> load_image -> decode_image uses our pixel-offset
+	   global to bake row*16 into pixel values; without setting it here those
+	   sprites would land on palette[1..15] (PoP VGA defaults: blue, green)
+	   instead of palette[81..95] (loaded environment colours) and the level
+	   tiles render as dark blue. */
+	extern int gba_decode_palette_offset;
+	int saved_offset = gba_decode_palette_offset;
+	gba_decode_palette_offset = 5 * 16;
+#endif
 	for (short graf_index = 0; graf_index < 8; ++graf_index) {
 		/*if (...) */ {
 			if (dathandle == NULL) {
@@ -1697,6 +1730,9 @@ void load_more_opt_graf(const char* filename) {
 	if (dathandle != NULL) {
 		close_dat(dathandle);
 	}
+#ifdef __GBA__
+	gba_decode_palette_offset = saved_offset;
+#endif
 }
 
 // seg000:148D
@@ -1716,6 +1752,12 @@ int do_paused() {
 	} else {
 		read_keyb_control();
 	}
+#ifdef __GBA__
+	if (control_x != CONTROL_RELEASED || control_y != CONTROL_RELEASED || control_shift != CONTROL_RELEASED) {
+		extern void gba_log(const char*,...);
+		gba_log("control: x=%d y=%d shift=%d joyst=%d", control_x, control_y, control_shift, is_joyst_mode);
+	}
+#endif
 	key = process_key();
 	if (is_ending_sequence && is_paused) {
 		is_paused = 0; // fix being able to pause the game during the ending sequence

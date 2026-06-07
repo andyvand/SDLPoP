@@ -336,8 +336,13 @@ int round_xpos_to_byte(int xpos,int round_direction) {
 
 // seg009:0C7A
 void quit(int exit_code) {
+#ifdef __GBA__
+	extern void gba_panic(unsigned char color_idx);
+	gba_panic(exit_code ? 1 : 2);
+#else
 	restore_stuff();
 	exit(exit_code);
+#endif
 }
 
 // seg009:0C90
@@ -466,11 +471,25 @@ dat_type* open_dat(const char* filename, int optional) {
 	if (fp != NULL) {
 		if (fread(&dat_header, 6, 1, fp) != 1)
 			goto failed;
+#ifdef __GBA__
+		/* Point dat_table directly into ROM instead of malloc+fread. Saves
+		   ~1.7 KB per open DAT (and avoids a malloc that fails late in
+		   the boot sequence when EWRAM is fragmented). The freed-up RAM
+		   is exactly what was running out for VDUNGEON / KID. */
+		if (fseek(fp, SDL_SwapLE32(dat_header.table_offset), SEEK_SET)) goto failed;
+		extern const uint8_t* gba_file_rom_ptr(FILE* fp, size_t* out_avail);
+		size_t avail = 0;
+		const uint8_t* rom = gba_file_rom_ptr(fp, &avail);
+		if (rom == NULL || (int)avail < SDL_SwapLE16(dat_header.table_size))
+			goto failed;
+		dat_table = (dat_table_type*)rom;
+#else
 		dat_table = (dat_table_type*) malloc(SDL_SwapLE16(dat_header.table_size));
 		if (dat_table == NULL ||
 		    fseek(fp, SDL_SwapLE32(dat_header.table_offset), SEEK_SET) ||
 		    fread(dat_table, SDL_SwapLE16(dat_header.table_size), 1, fp) != 1)
 			goto failed;
+#endif
 		pointer->handle = fp;
 		pointer->dat_table = dat_table;
 	} else if (optional == 0) {
@@ -562,8 +581,24 @@ chtab_type* load_sprites_from_file(int resource,int palette_bits, int quit_on_er
 	int n_images = shpl->n_images;
 	size_t alloc_size = sizeof(chtab_type) + sizeof(void *) * n_images;
 	chtab_type* chtab = (chtab_type*) malloc(alloc_size);
+	if (chtab == NULL) {
+		free(shpl);
+		return NULL;
+	}
 	memset(chtab, 0, alloc_size);
 	chtab->n_images = n_images;
+#ifdef __GBA__
+	/* Pre-compute the palette-row offset for this chtab so decode_image can
+	   bake `row*16 + v` into each sprite pixel value. Our 8bpp blits then
+	   write straight into the global palette[]'s correct chtab slot, where
+	   set_loaded_palette has just installed the colours. */
+	extern int gba_decode_palette_offset;
+	{
+		int rb = palette_bits, row = 0;
+		while (rb && !(rb & 1)) { rb >>= 1; ++row; }
+		gba_decode_palette_offset = rb ? (row * 16) : 0;
+	}
+#endif
 	for (int i = 1; i <= n_images; i++) {
 		SDL_Surface* image = load_image(resource + i, pal_ptr);
 //		if (image == NULL) printf(" failed");
@@ -584,7 +619,28 @@ chtab_type* load_sprites_from_file(int resource,int palette_bits, int quit_on_er
 //		printf("\n");
 		chtab->images[i-1] = image;
 	}
+#ifdef __GBA__
+	gba_decode_palette_offset = 0;
+	/* On GBA, pal_ptr lives in cartridge ROM so the earlier
+	   `pal_ptr->row_bits = palette_bits` write was a no-op; the global
+	   set_loaded_palette() would then iterate against a zero row mask and
+	   never load this chtab's colours. Inline the row-walk here using the
+	   local `palette_bits` value so the chtab's 16 vga[] colours actually
+	   get installed into the global palette[]. */
+	{
+		int row_bits   = palette_bits;
+		int dest_index = 0;
+		int source_row = 0;
+		for (int dest_row = 0; dest_row < 16; ++dest_row, dest_index += 16) {
+			if (row_bits & (1 << dest_row)) {
+				set_pal_arr(dest_index, 16, pal_ptr->vga + source_row * 16);
+				++source_row;
+			}
+		}
+	}
+#else
 	set_loaded_palette(pal_ptr);
+#endif
 	return chtab;
 }
 
@@ -818,6 +874,7 @@ int calc_stride(image_data_type* image_data) {
 
 byte* conv_to_8bpp(byte* in_data, int width, int height, int stride, int depth) {
 	byte* out_data = (byte*) malloc(width * height);
+	if (out_data == NULL) return NULL;
 	int pixels_per_byte = 8 / depth;
 	int mask = (1 << depth) - 1;
 	for (int y = 0; y < height; ++y) {
@@ -844,17 +901,63 @@ image_type* decode_image(image_data_type* image_data, dat_pal_type* palette) {
 	int flags = SDL_SwapLE16(image_data->flags);
 	int depth = ((flags >> 12) & 7) + 1;
 	int cmeth = (flags >> 8) & 0x0F;
+#ifdef __GBA__
+	/* GBA: don't allocate a pixel buffer. Either point straight at the
+	   pre-decoded 8bpp pixels in ROM (built by tools/preproc_dat) or, for
+	   the few sprites that didn't get preprocessed (mostly the built-in
+	   hc_font_data glyphs), stash the original image_data_type pointer
+	   and let the blit decode on demand. Saves ~1 KB per sprite + the
+	   big static scratch the legacy decoder used. */
+	{
+		extern int gba_decode_palette_offset;
+		extern image_type* gba_new_rom_surface(int w, int h, int bpp);
+		/* Struct-only surface; ->pixels is pointed at the sprite data fixed in
+		   ROM below. No throwaway width*height buffer is allocated per sprite
+		   (that used to fragment the heap and stall level loading). */
+		image_type* image = gba_new_rom_surface(width, height, 8);
+		if (image == NULL) return NULL;
+		if (cmeth == 0 && depth == 8) {
+			/* Pre-decoded: pixels point at raw 8bpp data right after the
+			   6-byte image_data_type header.  Blits read directly from ROM. */
+			image->pixels = (void*)((byte*)image_data + sizeof(image_data_type));
+			image->pitch  = width;
+			image->gba_rom_compressed = 0;
+		} else {
+			/* Legacy compressed path. */
+			image->pixels = (void*)image_data;
+			image->pitch  = width;
+			image->gba_rom_compressed = 1;
+		}
+		image->gba_palette_offset = (Uint8)gba_decode_palette_offset;
+		image->gba_depth          = (Uint8)depth;
+		image->gba_cmeth          = (Uint8)cmeth;
+
+		SDL_Color colors[16];
+		for (int i = 0; i < 16; ++i) {
+			colors[i].r = palette->vga[i].r << 2;
+			colors[i].g = palette->vga[i].g << 2;
+			colors[i].b = palette->vga[i].b << 2;
+			colors[i].a = SDL_ALPHA_OPAQUE;
+		}
+		colors[0].r = 0; colors[0].g = 0; colors[0].b = 0;
+		colors[0].a = SDL_ALPHA_TRANSPARENT;
+		SDL_SetPaletteColors(image->format->palette, colors, 0, 16);
+		return image;
+	}
+#else
 	int stride = calc_stride(image_data);
 	int dest_size = stride * height;
 	byte* dest = (byte*) malloc(dest_size);
+	if (dest == NULL) return NULL;
 	memset(dest, 0, dest_size);
 	decompr_img(dest, image_data, dest_size, cmeth, stride);
 	byte* image_8bpp = conv_to_8bpp(dest, width, height, stride, depth);
 	free(dest); dest = NULL;
+	if (image_8bpp == NULL) return NULL;
 	image_type* image = SDL_CreateRGBSurface(0, width, height, 8, 0, 0, 0, 0);
 	if (image == NULL) {
-		sdlperror("decode_image: SDL_CreateRGBSurface");
-		quit(1);
+		free(image_8bpp);
+		return NULL;
 	}
 	if (SDL_LockSurface(image) != 0) {
 		sdlperror("decode_image: SDL_LockSurface");
@@ -871,16 +974,13 @@ image_type* decode_image(image_data_type* image_data, dat_pal_type* palette) {
 		colors[i].r = palette->vga[i].r << 2;
 		colors[i].g = palette->vga[i].g << 2;
 		colors[i].b = palette->vga[i].b << 2;
-		colors[i].a = SDL_ALPHA_OPAQUE;   // SDL2's SDL_Color has a fourth alpha component
+		colors[i].a = SDL_ALPHA_OPAQUE;
 	}
-	// Force 0th color to be black for non-transparent blitters. (hitpoints, shadow)
-	// This is needed to remove the colored rectangles around hitpoints and the shadow, when using Brain's SNES graphics for example.
-	colors[0].r = 0;
-	colors[0].g = 0;
-	colors[0].b = 0;
+	colors[0].r = 0; colors[0].g = 0; colors[0].b = 0;
 	colors[0].a = SDL_ALPHA_TRANSPARENT;
-	SDL_SetPaletteColors(image->format->palette, colors, 0, 16); // SDL_SetColors = deprecated
+	SDL_SetPaletteColors(image->format->palette, colors, 0, 16);
 	return image;
+#endif  /* __GBA__ */
 }
 
 // seg009:121A
@@ -989,7 +1089,16 @@ int set_joy_mode() {
 // seg009:178B
 surface_type* make_offscreen_buffer(const rect_type* rect) {
 	// stub
-#ifndef USE_ALPHA
+#ifdef __GBA__
+	/* On GBA we can't afford a second 62 KB framebuffer. Reuse
+	   onscreen_surface_ — bump its refcount so SDLPoP can free_surface()
+	   it like an independent buffer. Drawing happens directly on the
+	   buffer that gba_present_surface() reads, so fade-by-blit effects
+	   become no-ops, but the game runs and shows content. */
+	(void)rect;
+	onscreen_surface_->refcount++;
+	return onscreen_surface_;
+#elif !defined(USE_ALPHA)
 	// Bit order matches onscreen buffer, good for fading.
 	return SDL_CreateRGBSurface(0, rect->right, rect->bottom, 24, Rmsk, Gmsk, Bmsk, 0);
 #else
@@ -1222,6 +1331,15 @@ font_type load_font_from_data(/*const*/ rawfont_type* data) {
 extern byte hc_small_font_data[];
 
 void load_font(void) {
+#ifdef __GBA__
+	/* Use the build-time pre-decompressed font (tools/predecomp_font + bin2c,
+	   generated into gba/src/hc_font_decoded.c). Every glyph is already
+	   depth=8/cmeth=0, so decode_image() takes its no-decode fast path and the
+	   per-blit decoder (gba_decode_compressed_surface) is never invoked while
+	   drawing text. */
+	extern const unsigned char hc_font_decoded[];
+	hc_font = load_font_from_data((rawfont_type*)hc_font_decoded);
+#else
 	// Try to load font from a file.
 	dat_type* dathandle = open_dat("font", 1);
 	hc_font.chtab = load_sprites_from_file(1000, 1<<1, 0);
@@ -1230,6 +1348,7 @@ void load_font(void) {
 		// Use built-in font.
 		hc_font = load_font_from_data((/*const*/ rawfont_type*)hc_font_data);
 	}
+#endif
 
 #ifdef USE_MENU
 	hc_small_font = load_font_from_data((rawfont_type*)hc_small_font_data);
@@ -1582,9 +1701,22 @@ void dialog_method_2_frame(dialog_type* dialog) {
 
 // seg009:0C44
 void show_dialog(const char* text) {
+#ifdef __GBA__
+	/* show_dialog is only used for non-fatal error notices (mostly the
+	   draw-table overflow checks in seg008). The overflowing entry has
+	   already been dropped by the caller's early return, so there is nothing
+	   to acknowledge. On GBA showmessage()'s "press any key" wait loop would
+	   freeze the game forever — a held movement key never satisfies
+	   key_test_quit(), which is exactly what hung the port on the first move.
+	   Log it and keep running. */
+	extern void gba_log(const char*, ...);
+	gba_log("show_dialog (dropped): %s", text);
+	return;
+#else
 	char string[256];
 	snprintf(string, sizeof(string), "%s\n\nPress any key to continue.", text);
 	showmessage(string, 1, &key_test_quit);
+#endif
 }
 
 // seg009:0791
@@ -1801,7 +1933,14 @@ peel_type* read_peel_from_screen(const rect_type* rect) {
 	peel_type* result = calloc(1, sizeof(peel_type));
 	//memset(&result, 0, sizeof(result));
 	result->rect = *rect;
-#ifndef USE_ALPHA
+#ifdef __GBA__
+	/* The GBA backbuffer is 8bpp indexed; matching that here saves ~27 KB
+	   per peel vs. the desktop 24bpp variant, which is the difference
+	   between fitting init_copyprot_dialog + sprite loading in EWRAM or not. */
+	SDL_Surface* peel_surface = SDL_CreateRGBSurface(0, rect->right - rect->left,
+	                                                 rect->bottom - rect->top, 8,
+	                                                 0, 0, 0, 0);
+#elif !defined(USE_ALPHA)
 	SDL_Surface* peel_surface = SDL_CreateRGBSurface(0, rect->right - rect->left, rect->bottom - rect->top,
 	                                                 24, Rmsk, Gmsk, Bmsk, 0);
 #else
@@ -1854,6 +1993,7 @@ enum userevents {
 	userevent_TIMER,
 };
 
+#ifndef __GBA__
 short speaker_playing = 0;
 short digi_playing = 0;
 short midi_playing = 0;
@@ -2478,7 +2618,9 @@ void turn_sound_on_off(byte new_state) {
 int check_sound_playing() {
 	return speaker_playing || digi_playing || midi_playing || ogg_playing;
 }
+#endif // !__GBA__
 
+#ifndef __GBA__
 void apply_aspect_ratio() {
 	// Allow us to use a consistent set of screen co-ordinates, even if the screen size changes
 	if (use_correct_aspect_ratio) {
@@ -2790,6 +2932,33 @@ void update_screen() {
 	SDL_RenderCopy(renderer_, target_texture, NULL, NULL);
 	SDL_RenderPresent(renderer_);
 }
+#else  /* __GBA__ */
+void apply_aspect_ratio(void) { }
+void window_resized(void) { }
+void init_overlay(void) { }
+void init_scaling(void) { }
+void set_gr_mode(byte grmode) {
+	(void)grmode;
+	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+	onscreen_surface_ = SDL_CreateRGBSurface(0, 320, 192, 8, 0, 0, 0, 0);
+	if (!onscreen_surface_) quit(1);
+	graphics_mode = gmMcgaVga;
+#ifdef USE_TEXT
+	/* Without this, hc_font.chtab is NULL, and the very first draw_text in
+	   show_loading dereferences font->chtab->images[c], reading garbage from
+	   BIOS and then iterating a huge image in method_3_blit_mono. */
+	load_font();
+#endif
+}
+SDL_Surface* get_final_surface(void) { return onscreen_surface_; }
+void draw_overlay(void) { }
+void update_screen(void) {
+	extern void gba_camera_update(void);
+	extern int  gba_present_surface(SDL_Surface*);
+	gba_camera_update();
+	gba_present_surface(onscreen_surface_);
+}
+#endif /* __GBA__ */
 
 // seg009:9289
 void set_pal_arr(int start,int count,const rgb_type* array) {
@@ -2967,6 +3136,20 @@ void *load_from_opendats_alloc(int resource, const char* extension, data_locatio
 	if (out_result != NULL) *out_result = result;
 	if (out_size != NULL) *out_size = size;
 	if (result == data_none) return NULL;
+#ifdef __GBA__
+	/* DAT data already lives in cartridge ROM. Return a pointer into ROM
+	   instead of malloc+fread'ing a copy: each chtab load would otherwise
+	   duplicate every sprite into EWRAM (~150 KB just for kid sprites,
+	   blowing the 158 KB heap). Callers must free with gba_free_safe(). */
+	if (result == data_DAT) {
+		extern const uint8_t* gba_file_rom_ptr(FILE* fp, size_t* out_avail);
+		size_t avail = 0;
+		const uint8_t* rom = gba_file_rom_ptr(fp, &avail);
+		if (rom != NULL && (int)avail >= size) {
+			return (void*)rom;
+		}
+	}
+#endif
 	void* area = malloc(size);
 	//read(fd, area, size);
 	if (fread(area, size, 1, fp) != 1) {
@@ -2992,6 +3175,20 @@ int load_from_opendats_to_area(int resource,void* area,int length, const char* e
 	FILE* fp = NULL;
 	load_from_opendats_metadata(resource, extension, &fp, &result, &checksum, &size, &pointer);
 	if (result == data_none) return 0;
+#ifdef __GBA__
+	/* No fread: copy directly from the ROM-resident DAT bytes. */
+	if (result == data_DAT) {
+		extern const uint8_t* gba_file_rom_ptr(FILE* fp, size_t* out_avail);
+		size_t avail = 0;
+		const uint8_t* rom = gba_file_rom_ptr(fp, &avail);
+		int n = MIN(size, length);
+		if (rom != NULL && (int)avail >= n) {
+			memcpy(area, rom, n);
+		} else {
+			memset(area, 0, n);
+		}
+	}
+#else
 	if (fread(area, MIN(size, length), 1, fp) != 1) {
 		fprintf(stderr, "%s: %s, resource %d, size %d, failed: %s\n",
 			__func__, pointer->filename, resource,
@@ -2999,6 +3196,7 @@ int load_from_opendats_to_area(int resource,void* area,int length, const char* e
 		memset(area, 0, MIN(size, length));
 	}
 	if (result == data_directory) fclose(fp);
+#endif
 	/* XXX: check checksum */
 	return 0;
 }
@@ -3040,6 +3238,51 @@ void method_1_blit_rect(surface_type* target_surface,surface_type* source_surfac
 image_type* method_3_blit_mono(image_type* image,int xpos,int ypos,int blitter,byte color) {
 	int w = image->w;
 	int h = image->h;
+#ifdef __GBA__
+	/* GBA fast path: both image (font glyph) and current_target_surface are
+	   8bpp indexed. The desktop path converts to ARGB8888 just to recolor,
+	   then relies on SDL's 32->8bpp blit with the dest palette to map back
+	   to indices. We have no destination palette, so write the requested
+	   palette index directly. Any non-zero source pixel becomes "color";
+	   zero stays transparent.
+	   Sources marked gba_rom_compressed hold a ROM image_data_type pointer
+	   in pixels (decode_image deferred the unpack to save RAM); decode into
+	   the shared scratch first or text/mono blits render struct headers as
+	   gibberish. */
+	const byte* src_pixels;
+	int         src_pitch;
+	if (image->gba_rom_compressed) {
+		extern uint8_t* gba_decode_compressed_surface(SDL_Surface*);
+		uint8_t* unpacked = gba_decode_compressed_surface(image);
+		if (unpacked == NULL) return image;
+		src_pixels = unpacked;
+		src_pitch  = w;
+	} else {
+		src_pixels = (const byte*)image->pixels;
+		src_pitch  = image->pitch;
+	}
+	/* Clamp the iteration to the on-screen region. A glyph/sprite with a
+	   corrupted huge w/h (seen on the kid's first move: a bad font image made
+	   this loop run ~w*h≈billions of times = a hard freeze inside
+	   draw_text_character) would otherwise spin even though every write is
+	   bounds-checked. Iterating only the visible rows/cols caps the work at
+	   the surface size no matter how broken the dimensions are. */
+	int surf_w = current_target_surface->w;
+	int surf_h = current_target_surface->h;
+	int y0 = (ypos < 0) ? -ypos : 0;
+	int y1 = h; if (y1 > surf_h - ypos) y1 = surf_h - ypos;
+	int x0 = (xpos < 0) ? -xpos : 0;
+	int x1 = w; if (x1 > surf_w - xpos) x1 = surf_w - xpos;
+	for (int y = y0; y < y1; ++y) {
+		const byte* sp = src_pixels + (size_t)y * src_pitch;
+		byte* dp = (byte*)current_target_surface->pixels +
+		           (size_t)(ypos + y) * current_target_surface->pitch + xpos;
+		for (int x = x0; x < x1; ++x) {
+			if (sp[x] != 0) dp[x] = color;
+		}
+	}
+	return image;
+#else
 	if (SDL_SetColorKey(image, SDL_TRUE, 0) != 0) {
 		sdlperror("method_3_blit_mono: SDL_SetColorKey");
 		quit(1);
@@ -3086,6 +3329,7 @@ image_type* method_3_blit_mono(image_type* image,int xpos,int ypos,int blitter,b
 	SDL_FreeSurface(colored_image);
 
 	return image;
+#endif /* __GBA__ */
 }
 
 // Workaround for a bug in SDL2 (before v2.0.4):
@@ -3124,6 +3368,15 @@ int safe_SDL_FillRect(SDL_Surface* dst, const SDL_Rect* rect, Uint32 color) {
 const rect_type* method_5_rect(const rect_type* rect,int blit,byte color) {
 	SDL_Rect dest_rect;
 	rect_to_sdlrect(rect, &dest_rect);
+#ifdef __GBA__
+	/* current_target_surface is the 8bpp screen buffer whose SDL_Palette is
+	   empty (we drive the hardware palette from the global PoP palette[]),
+	   so SDL_MapRGB would round-trip to index 0 for every input. The fill
+	   value IS the PoP palette index — write it straight. */
+	(void)blit;
+	SDL_FillRect(current_target_surface, &dest_rect, (Uint32)color);
+	return rect;
+#else
 	rgb_type palette_color = palette[color];
 #ifndef USE_ALPHA
 	uint32_t rgb_color = SDL_MapRGBA(current_target_surface->format, palette_color.r<<2, palette_color.g<<2, palette_color.b<<2, 0xFF);
@@ -3135,6 +3388,7 @@ const rect_type* method_5_rect(const rect_type* rect,int blit,byte color) {
 		quit(1);
 	}
 	return rect;
+#endif
 }
 
 void draw_rect_with_alpha(const rect_type* rect, byte color, byte alpha) {
@@ -3801,6 +4055,12 @@ void do_simple_wait(int timer_index) {
 	if ((replaying && skipping_replay) || is_validate_mode) return;
 #endif
 	update_screen();
+	// Always pump events at least once per frame. On slow targets (e.g. the
+	// GBA) a frame's logic+render can overrun the timer budget, so
+	// has_timer_stopped() returns true on the first check and the loop body
+	// below never runs. Since this is the only process_events() call in the
+	// gameplay loop, skipping it freezes key_states and kills all input.
+	process_events();
 	while (! has_timer_stopped(timer_index)) {
 		SDL_Delay(1);
 		process_events();
@@ -3813,6 +4073,13 @@ int do_wait(int timer_index) {
 	if ((replaying && skipping_replay) || is_validate_mode) return 0;
 #endif
 	update_screen();
+	// Pump events + check input at least once per frame even if the frame
+	// already overran the timer budget (see do_simple_wait above).
+	{
+		process_events();
+		int key = do_paused();
+		if (key != 0 && (word_1D63A != 0 || key == 0x1B)) return 1;
+	}
 	while (! has_timer_stopped(timer_index)) {
 		SDL_Delay(1);
 		process_events();
@@ -4178,6 +4445,27 @@ void set_pal_256(rgb_type* source) {
 }
 #endif // USE_FADE
 
+#ifdef __GBA__
+/* GBA: rendering ignores the per-image SDL_Palette and instead maps each sprite
+   pixel v -> global palette[image->gba_palette_offset + v] at blit time. So the
+   colour-variation palettes (guard colours, level 1.3 environment/wall variants)
+   that the desktop applies via SDL_SetPaletteColors have no effect unless we
+   write them into palette[] at the chtab's offset. Without this the guard kept
+   its placeholder load-time colours and drew as garbled flame-coloured blobs.
+   `colors` is packed r,g,b bytes in 6-bit VGA range (the same format set_pal
+   wants); index 0 is the transparent slot and is never drawn. */
+void set_chtab_palette(chtab_type* chtab, byte* colors, int n_colors) {
+	if (chtab == NULL) return;
+	int off = -1;
+	for (int i = 0; i < chtab->n_images; ++i) {
+		if (chtab->images[i] != NULL) { off = chtab->images[i]->gba_palette_offset; break; }
+	}
+	if (off < 0) return;
+	for (int i = 0; i < n_colors && (off + i) < 256; ++i) {
+		set_pal(off + i, colors[i*3 + 0], colors[i*3 + 1], colors[i*3 + 2]);
+	}
+}
+#else
 void set_chtab_palette(chtab_type* chtab, byte* colors, int n_colors) {
 	if (chtab != NULL) {
 		SDL_Color* scolors = (SDL_Color*) malloc(n_colors*sizeof(SDL_Color));
@@ -4221,6 +4509,7 @@ void set_chtab_palette(chtab_type* chtab, byte* colors, int n_colors) {
 		free(scolors);
 	}
 }
+#endif /* __GBA__ */
 
 int has_timer_stopped(int timer_index) {
 #ifdef USE_COMPAT_TIMER
