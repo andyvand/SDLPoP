@@ -1602,11 +1602,18 @@ void draw_setting(settings_area_type* settings_area, int i, rect_type* parent, i
 
 		SDL_Rect dest_rect;
 		rect_to_sdlrect(&setting_box, &dest_rect);
+#ifdef __GBA__
+		// No ARGB overlay on GBA: fill the 8bpp screen directly with a PoP
+		// palette index (SDL_MapRGB can't help — the screen surface's palette
+		// is never populated, the hardware palette is driven from palette[]).
+		SDL_FillRect(current_target_surface, &dest_rect, (Uint32)color_8_darkgray);
+#else
 		uint32_t rgb_color = SDL_MapRGBA(overlay_surface->format, 55, 55, 55, 255);
 		if (SDL_FillRect(overlay_surface, &dest_rect, rgb_color) != 0) {
 			sdlperror("draw_setting: SDL_FillRect");
 			quit(1);
 		}
+#endif
 		rect_type left_side_of_setting_box = setting_box;
 		left_side_of_setting_box.left = setting_box.left - 2;
 		left_side_of_setting_box.right = setting_box.left;
@@ -1986,7 +1993,7 @@ void draw_confirmation_dialog(int which_dialog, const char* text) {
 			old_highlighted_button = highlighted_button;
 			// Need to redraw the dialog box.
 			uint32_t clear_color = SDL_MapRGBA(current_target_surface->format, 0, 0, 0, 255);
-			SDL_FillRect(overlay_surface, NULL, clear_color);
+			SDL_FillRect(current_target_surface, NULL, clear_color); // == overlay_surface on desktop; onscreen_surface_ on GBA (overlay is NULL)
 			draw_rect(&copyprot_dialog->peel_rect, color_0_black);
 			dialog_method_2_frame(copyprot_dialog);
 			rect_type rect;
@@ -2051,7 +2058,7 @@ void draw_select_level_dialog(void) {
 			old_edited_level_number = menu_current_level;
 			// Need to redraw the dialog box.
 			uint32_t clear_color = SDL_MapRGBA(current_target_surface->format, 0, 0, 0, 255);
-			SDL_FillRect(overlay_surface, NULL, clear_color);
+			SDL_FillRect(current_target_surface, NULL, clear_color); // == overlay_surface on desktop; onscreen_surface_ on GBA (overlay is NULL)
 			draw_rect(&copyprot_dialog->peel_rect, color_0_black);
 			dialog_method_2_frame(copyprot_dialog);
 			rect_type rect;
@@ -2078,10 +2085,35 @@ void draw_select_level_dialog(void) {
 
 int need_full_menu_redraw_count;
 
+#ifdef __GBA__
+extern int gba_menu_active; // gba/src/gba_viewport.c — freezes the gameplay camera
+// The menu is laid out for the full 320x192 world surface, but the GBA only
+// shows a 240x160 window into it. Pin the camera (gba_menu_active) and pan the
+// window so whichever part the player is interacting with is on screen: the
+// centred pause menu, the left subsection column, or the wider settings panel.
+static void gba_menu_set_viewport(void) {
+	extern void gba_set_viewport(int x, int y);
+	int vx = 40, vy = 16; // pause menu: centred (items are centred at x~160)
+	if (drawn_menu == 1) {
+		vy = 8;
+		vx = (controlled_area == 1) ? 80 : 0; // settings panel (right) vs. subsection list (left)
+	}
+	gba_set_viewport(vx, vy);
+}
+#endif
+
 void draw_menu() {
 	escape_key_suppressed = (key_states[SDL_SCANCODE_BACKSPACE] & KEYSTATE_HELD || key_states[SDL_SCANCODE_ESCAPE] & KEYSTATE_HELD);
 	surface_type* saved_target_surface = current_target_surface;
+#ifdef __GBA__
+	// overlay_surface is NULL on GBA (no separate ARGB overlay / compositing
+	// step); draw straight into the 8bpp screen surface that update_screen()
+	// presents. The menu fills the screen with an opaque backdrop anyway.
+	current_target_surface = onscreen_surface_;
+	gba_menu_active = 1;
+#else
 	current_target_surface = overlay_surface;
+#endif
 
 	need_close_menu = false;
 	while (!need_close_menu) {
@@ -2145,6 +2177,12 @@ void draw_menu() {
 			draw_settings_menu();
 		}
 		textstate.ptr_font = saved_font;
+#ifdef __GBA__
+		// Pan the 240x160 window to whatever the player is on now (set after
+		// drawing so drawn_menu/controlled_area reflect this frame), then
+		// present — gba_camera_update() leaves it alone while gba_menu_active.
+		gba_menu_set_viewport();
+#endif
 		if (!need_close_menu) {
 			update_screen();
 		}
@@ -2154,6 +2192,9 @@ void draw_menu() {
 	}
 
 	current_target_surface = saved_target_surface;
+#ifdef __GBA__
+	gba_menu_active = 0; // hand the viewport back to the gameplay camera
+#endif
 }
 
 void clear_menu_controls() {

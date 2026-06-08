@@ -3394,15 +3394,45 @@ const rect_type* method_5_rect(const rect_type* rect,int blit,byte color) {
 void draw_rect_with_alpha(const rect_type* rect, byte color, byte alpha) {
 	SDL_Rect dest_rect;
 	rect_to_sdlrect(rect, &dest_rect);
+#ifdef __GBA__
+	// The 8bpp screen surface can't alpha-blend. alpha==0 means "leave the
+	// background showing" (used so "GAME PAUSED" stays visible), so skip it;
+	// otherwise fill opaquely with the PoP palette index. The menu's dimming
+	// backdrop just becomes a solid panel — fine for a pause overlay.
+	if (alpha == 0) return;
+	SDL_FillRect(current_target_surface, &dest_rect, (Uint32)color);
+#else
 	rgb_type palette_color = palette[color];
 	uint32_t rgb_color = SDL_MapRGBA(overlay_surface->format, palette_color.r<<2, palette_color.g<<2, palette_color.b<<2, alpha);
 	if (safe_SDL_FillRect(current_target_surface, &dest_rect, rgb_color) != 0) {
 		sdlperror("draw_rect_with_alpha: SDL_FillRect");
 		quit(1);
 	}
+#endif
 }
 
 void draw_rect_contours(const rect_type* rect, byte color) {
+#ifdef __GBA__
+	// 8bpp screen: draw the 4 edges directly, writing the PoP palette index.
+	{
+		SDL_Rect r;
+		rect_to_sdlrect(rect, &r);
+		byte* pixels = (byte*)current_target_surface->pixels;
+		int pitch = current_target_surface->pitch;
+		int xmin = MAX(0, r.x), xmax = MIN(current_target_surface->w, r.x + r.w);
+		int ymin = MAX(0, r.y), ymax = MIN(current_target_surface->h, r.y + r.h);
+		if (xmax <= xmin || ymax <= ymin) return;
+		for (int x = xmin; x < xmax; ++x) {
+			pixels[(size_t)ymin * pitch + x] = color;
+			pixels[(size_t)(ymax - 1) * pitch + x] = color;
+		}
+		for (int y = ymin; y < ymax; ++y) {
+			pixels[(size_t)y * pitch + xmin] = color;
+			pixels[(size_t)y * pitch + (xmax - 1)] = color;
+		}
+		return;
+	}
+#endif
 	// TODO: handle 24 bit surfaces? (currently, 32 bit surface is assumed)
 	if (current_target_surface->format->BitsPerPixel != 32) {
 		printf("draw_rect_contours: not implemented for %d bit surfaces\n", current_target_surface->format->BitsPerPixel);

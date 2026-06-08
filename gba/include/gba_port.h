@@ -30,6 +30,10 @@ int  gba_present_surface(SDL_Surface* s);
 void gba_apply_palette(const SDL_Color* colors, int first, int n);
 void gba_set_viewport(int x, int y); /* offset in pixels into source surface */
 void gba_get_viewport(int* x, int* y);
+/* When non-zero, gba_camera_update() leaves the viewport untouched so the
+   pause/settings menu can pin it (the menu is laid out for the full 320px
+   world, wider than the 240px screen; draw_menu() pans the viewport itself). */
+extern int gba_menu_active;
 
 /* --- Audio: 8-bit PCM mixer over DirectSound A (DMA1) --------------------- */
 void gba_audio_init(const SDL_AudioSpec* desired);

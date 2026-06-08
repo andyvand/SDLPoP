@@ -20,9 +20,16 @@ extern void   gba_get_viewport(int* x, int* y);
    centred default. */
 int gba_kid_px = 0, gba_kid_py = 0, gba_kid_valid = 0;
 
+/* Set by draw_menu() (src/menu.c) while the pause/settings menu is open. The
+   menu pins the viewport itself (see gba_menu_set_viewport there), so the
+   per-frame camera follow below must not fight it. */
+int gba_menu_active = 0;
+
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 void gba_camera_update(void) {
+    if (gba_menu_active) return; /* menu owns the viewport while open */
+
     /* Default: centre the 240x160 viewport over the 320x192 world. */
     int target_x = (WORLD_W - VIEW_W) / 2;  /* 40 */
     int target_y = (WORLD_H - VIEW_H) / 2;  /* 16 */
