@@ -780,11 +780,7 @@ extern custom_options_type custom_defaults INIT(= {
 		.enable_wda_in_palace = 0,
 		.vga_palette = VGA_PALETTE_DEFAULT,
 		.first_level = 1,
-#ifdef __GBA__
-		.skip_title = 1, /* show_title loads ~60 KB of title-screen sprites and runs a multi-stage fade that doesn't fit in GBA EWRAM. */
-#else
 		.skip_title = 0,
-#endif
 		.shift_L_allowed_until_level = 4,
 		.shift_L_reduced_minutes = 15,
 		.shift_L_reduced_ticks  = 719,

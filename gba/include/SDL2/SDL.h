@@ -346,6 +346,8 @@ typedef union SDL_Event {
 int  SDL_PollEvent(SDL_Event* event);
 int  SDL_PushEvent(SDL_Event* event);
 const Uint8* SDL_GetKeyboardState(int* numkeys);
+Uint32 SDL_GetMouseState(int* x, int* y);
+const char* SDL_GetScancodeName(SDL_Scancode scancode);
 int  SDL_ShowCursor(int toggle);
 void SDL_StartTextInput(void);
 void SDL_StopTextInput(void);
@@ -378,6 +380,8 @@ int  SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* px, int
 int  SDL_RenderSetLogicalSize(SDL_Renderer* r, int w, int h);
 int  SDL_RenderSetIntegerScale(SDL_Renderer* r, SDL_bool enable);
 int  SDL_RenderGetLogicalSize(SDL_Renderer* r, int* w, int* h);
+void SDL_RenderGetScale(SDL_Renderer* r, float* scaleX, float* scaleY);
+void SDL_RenderGetViewport(SDL_Renderer* r, SDL_Rect* rect);
 int  SDL_GetRendererOutputSize(SDL_Renderer* r, int* w, int* h);
 int  SDL_GetWindowFlags(SDL_Window* w);
 void SDL_SetWindowFullscreen(SDL_Window* w, Uint32 flags);

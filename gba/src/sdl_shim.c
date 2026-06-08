@@ -483,6 +483,9 @@ int  SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* r, const void* p, int pit
 int  SDL_RenderSetLogicalSize(SDL_Renderer* r, int w, int h)  { (void)r; (void)w; (void)h; return 0; }
 int  SDL_RenderSetIntegerScale(SDL_Renderer* r, SDL_bool e)   { (void)r; (void)e; return 0; }
 int  SDL_RenderGetLogicalSize(SDL_Renderer* r, int* w, int* h){ (void)r; if(w)*w=240; if(h)*h=160; return 0; }
+/* No scaling/letterboxing on GBA: 1:1 to the 240x160 framebuffer. */
+void SDL_RenderGetScale(SDL_Renderer* r, float* sx, float* sy){ (void)r; if(sx)*sx=1.0f; if(sy)*sy=1.0f; }
+void SDL_RenderGetViewport(SDL_Renderer* r, SDL_Rect* rect){ (void)r; if(rect){ rect->x=0; rect->y=0; rect->w=240; rect->h=160; } }
 int  SDL_GetRendererOutputSize(SDL_Renderer* r, int* w, int* h){ (void)r; if(w)*w=240; if(h)*h=160; return 0; }
 int  SDL_GetWindowFlags(SDL_Window* w)             { (void)w; return 0; }
 void SDL_SetWindowFullscreen(SDL_Window* w, Uint32 f) { (void)w; (void)f; }
@@ -591,6 +594,19 @@ static Uint8 s_keystate[SDL_NUM_SCANCODES];
 const Uint8* SDL_GetKeyboardState(int* numkeys) {
     if (numkeys) *numkeys = SDL_NUM_SCANCODES;
     return s_keystate;
+}
+/* GBA has no mouse: report (0,0) with no buttons held so the menu falls back to
+   D-pad/button navigation. */
+Uint32 SDL_GetMouseState(int* x, int* y) {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    return 0;
+}
+/* The controls menu prints key-binding names. We don't ship a scancode-name
+   table on GBA, so return an empty string (the numeric code is shown too). */
+const char* SDL_GetScancodeName(SDL_Scancode scancode) {
+    (void)scancode;
+    return "";
 }
 void gba_set_key(int scancode, int down) {
     if ((unsigned)scancode >= SDL_NUM_SCANCODES) return;

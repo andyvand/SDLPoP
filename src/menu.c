@@ -314,20 +314,31 @@ enum setting_ids {
 };
 
 typedef struct setting_type {
-	int index;
 	int id;
-	int previous, next;
 	byte style;
 	byte number_type;
 	void* linked;
 	void* required;
 	int min, max; // for 'number'-style settings
-	char text[64];
-	char explanation[256];
+	// Stored as pointers to string literals (in .rodata) rather than inline
+	// buffers: nothing writes to these, and on GBA the inline char[64]+char[256]
+	// per entry pushed the settings tables ~56 KB over the EWRAM budget.
+	const char* text;
+	const char* explanation;
 	names_list_type* names_list;
 } setting_type;
 
-setting_type general_settings[] = {
+// The settings descriptor tables are read-only at runtime (the up/down nav
+// indices used to live in setting_type but are now computed on the fly in
+// draw_setting, and the values themselves are reached through ->linked). On
+// GBA we park them in ROM (.rodata) instead of the scarce 256 KB EWRAM.
+#ifdef __GBA__
+#define MENU_SETTINGS_RODATA __attribute__((section(".rodata.menusettings")))
+#else
+#define MENU_SETTINGS_RODATA
+#endif
+
+setting_type general_settings[] MENU_SETTINGS_RODATA = {
 		{.id = SETTING_SHOW_MENU_ON_PAUSE, .style = SETTING_STYLE_TOGGLE, .linked = &enable_pause_menu,
 				.text = "Enable pause menu",
 				.explanation = "Show the in-game menu when you pause the game.\n"
@@ -367,7 +378,7 @@ int integer_scaling_possible =
 #endif
 ;
 
-setting_type visuals_settings[] = {
+setting_type visuals_settings[] MENU_SETTINGS_RODATA = {
 		{.id = SETTING_FULLSCREEN, .style = SETTING_STYLE_TOGGLE, .linked = &start_fullscreen,
 				.text = "Start fullscreen",
 				.explanation = "Start the game in fullscreen mode.\nYou can also toggle fullscreen by pressing Alt+Enter."},
@@ -411,7 +422,7 @@ setting_type visuals_settings[] = {
 #endif
 };
 
-setting_type gameplay_settings[] = {
+setting_type gameplay_settings[] MENU_SETTINGS_RODATA = {
 		{.id = SETTING_ENABLE_CHEATS, .style = SETTING_STYLE_TOGGLE, .linked = &cheats_enabled,
 				.text = "Enable cheats",
 				.explanation = "Turn cheats on or off."/*"\nAlso, display the CHEATS option on the pause menu."*/},
@@ -656,7 +667,7 @@ NAMES_LIST(row_setting_names, {"Top", "Middle", "Bottom"});
 KEY_VALUE_LIST(direction_setting_names, {{"Left", dir_FF_left}, {"Right", dir_0_right}});
 extern names_list_type never_is_16_list;
 
-setting_type mods_settings[] = {
+setting_type mods_settings[] MENU_SETTINGS_RODATA = {
 		{.id = SETTING_USE_CUSTOM_OPTIONS, .style = SETTING_STYLE_TOGGLE, .linked = &use_custom_options,
 				.text = "Use customization options",
 				.explanation = "Turn customization options on or off.\n(default = OFF)"},
@@ -999,7 +1010,7 @@ KEY_VALUE_LIST(guard_type_setting_names, {{"None", -1}, {"Normal", 0}, {"Fat", 1
 NAMES_LIST(entry_pose_setting_names, {"Turning", "Falling", "Running"});
 KEY_VALUE_LIST(off_setting_name, {{"Off", -1}}); // used for the seamless exit setting
 
-setting_type level_settings[] = {
+setting_type level_settings[] MENU_SETTINGS_RODATA = {
 		{.id = SETTING_LEVEL_SETTINGS, .style = SETTING_STYLE_TEXT_ONLY, .required = &use_custom_options,
 				.text = "Customize another level...",
 				.explanation = "Select another level to customize."},
@@ -1040,7 +1051,7 @@ setting_type level_settings[] = {
 						"Set to -1 to disable."},
 };
 
-setting_type controls_settings[] = {
+setting_type controls_settings[] MENU_SETTINGS_RODATA = {
 		{.id = SETTING_KEY_LEFT, .style = SETTING_STYLE_KEY, .required = NULL,
 				.linked = &key_left, .number_type = SETTING_INT,
 				.text = "Left",
@@ -1124,17 +1135,13 @@ void init_pause_menu_items(pause_menu_item_type* first_item, int item_count) {
 }
 
 void init_settings_list(setting_type* first_setting, int setting_count) {
-	if (setting_count > 0) {
-		for (int i = 0; i < setting_count; ++i) {
-			setting_type* item = first_setting + i;
-			item->index = i;
-			item->previous = (first_setting + MAX(0, i-1))->id;
-			item->next = (first_setting + MIN(setting_count-1, i+1))->id;
-		}
-//		setting_type* last_item = first_setting + (setting_count-1);
-//		first_setting->previous = last_item->id;
-//		last_item->next = first_setting->id;
-	}
+	// The per-setting navigation indices (index/previous/next) used to be
+	// precomputed and stored in each setting_type here. They are now derived on
+	// the fly in draw_setting() from the setting's position, which lets the
+	// settings tables be const/ROM-resident (see MENU_SETTINGS_RODATA). Nothing
+	// to initialize anymore.
+	(void)first_setting;
+	(void)setting_count;
 }
 
 
@@ -1565,7 +1572,8 @@ char* print_setting_value_(setting_type* setting, int value, char* buffer, size_
 	return buffer;
 }
 
-void draw_setting(setting_type* setting, rect_type* parent, int* y_offset, int inactive_text_color) {
+void draw_setting(settings_area_type* settings_area, int i, rect_type* parent, int* y_offset, int inactive_text_color) {
+	setting_type* setting = &settings_area->settings[i];
 	rect_type text_rect = *parent;
 	text_rect.top += *y_offset;
 	int text_color = inactive_text_color;
@@ -1584,10 +1592,13 @@ void draw_setting(setting_type* setting, rect_type* parent, int* y_offset, int i
 	}
 
 	if (highlighted_setting_id == setting->id) {
-		next_setting_id = setting->next;
-		previous_setting_id = setting->previous;
-		at_scroll_up_boundary = (setting->index == scroll_position);
-		at_scroll_down_boundary = (setting->index == scroll_position + 8);
+		// Up/down navigation targets, derived from this setting's position in the
+		// area (previously precomputed into setting_type by init_settings_list).
+		int count = settings_area->setting_count;
+		next_setting_id = settings_area->settings[MIN(count - 1, i + 1)].id;
+		previous_setting_id = settings_area->settings[MAX(0, i - 1)].id;
+		at_scroll_up_boundary = (i == scroll_position);
+		at_scroll_down_boundary = (i == scroll_position + 8);
 
 		SDL_Rect dest_rect;
 		rect_to_sdlrect(&setting_box, &dest_rect);
@@ -1782,7 +1793,7 @@ void draw_settings_area(settings_area_type* settings_area) {
 	for (int i = 0; (i < settings_area->setting_count) && (num_drawn_settings < 9); ++i) {
 		if (i >= scroll_position) {
 			++num_drawn_settings;
-			draw_setting(&settings_area->settings[i], &settings_area_rect, &y_offset, color_15_brightwhite);
+			draw_setting(settings_area, i, &settings_area_rect, &y_offset, color_15_brightwhite);
 		}
 	}
 

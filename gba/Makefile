@@ -61,7 +61,7 @@ BINFILES := $(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.bin)))
 
 # Exclude SDLPoP source files that we replace or that pull in dependencies
 # we can't satisfy on GBA. The rest of the upstream code compiles unchanged.
-EXCLUDE_CFILES := main.c menu.c midi.c opl3.c lighting.c screenshot.c \
+EXCLUDE_CFILES := main.c midi.c opl3.c lighting.c screenshot.c \
                   replay.c stb_vorbis.c
 CFILES := $(filter-out $(EXCLUDE_CFILES),$(CFILES))
 

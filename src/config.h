@@ -381,8 +381,9 @@ The authors of this program may be contacted at https://forum.princed.org
 #define USE_AUTO_INPUT_MODE
 #endif
 
-#if defined(USE_TEXT) && !defined(__GBA__)
-// Display the in-game menu.
+#if defined(USE_TEXT)
+// Display the in-game menu. (Enabled on GBA too: the menu draws through the
+// text/dialog routines that are already compiled in.)
 #define USE_MENU
 #endif
 

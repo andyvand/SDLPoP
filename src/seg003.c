@@ -67,13 +67,6 @@ void play_level(int level_number) {
 			}
 			cutscene_func = tbl_cutscenes[custom->tbl_cutscenes_by_index[level_number]];
 			if (cutscene_func != NULL
-				/* Skip cutscenes on GBA: they open PV.DAT + animate through
-				   multiple full-screen frames whose decoded sizes blow the
-				   sprite scratch budget; without this the game hangs on a
-				   blue intro frame waiting for sound to finish. */
-#ifdef __GBA__
-				&& 0
-#endif
 				#ifdef USE_REPLAY
 				&& !(recording || replaying)
 				#endif
