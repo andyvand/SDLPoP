@@ -1002,7 +1002,7 @@ SDL_Surface* hflip(SDL_Surface* input) {
 
 	// The simplest way to create a surface with same format as input:
 	SDL_Surface* output = SDL_ConvertSurface(input, input->format, 0);
-	SDL_SetSurfacePalette(output, input->format->palette);
+	SDL_SetSurfacePalette(output, SURFACE_PALETTE(input));
 	// The copied image will be overwritten anyway.
 	if (output == NULL) {
 		sdlperror("hflip: SDL_ConvertSurface");

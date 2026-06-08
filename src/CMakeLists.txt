@@ -1,5 +1,9 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.5)
 project(SDLPoP)
+
+# SDL3 + SDL3_image is the default backend. Configure with -DUSE_SDL3=OFF to
+# build against SDL2 + SDL2_image instead.
+option(USE_SDL3 "Build against SDL3 instead of SDL2" ON)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -std=c99")
 
@@ -79,6 +83,8 @@ set(SOURCE_FILES
         screenshot.c
         menu.c
         stb_vorbis.c
+        sdl2_to_sdl3.c
+        sdl2_to_sdl3.h
         icon.rc
         )
 
@@ -115,6 +121,20 @@ else()
             ${CMAKE_SOURCE_DIR}/../SDLPoP.ini ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/prince.app/Contents/MacOS/SDLPoP.ini)
 endif()
 
+if(USE_SDL3)
+    target_compile_definitions(prince PRIVATE USE_SDL3)
+    if(WIN32)
+        target_link_libraries(prince mingw32 SDL3 SDL3_image)
+    elseif(APPLE)
+        target_link_libraries(prince SDL3 SDL3_image m)
+    else() # Linux, *BSD, etc.
+        include(FindPkgConfig)
+        pkg_search_module(SDL3 REQUIRED sdl3)
+        pkg_search_module(SDL3IMAGE REQUIRED sdl3-image)
+        target_include_directories(prince PRIVATE ${SDL3_INCLUDE_DIRS} ${SDL3IMAGE_INCLUDE_DIRS})
+        target_link_libraries(prince PRIVATE ${SDL3_LIBRARIES} ${SDL3IMAGE_LIBRARIES} m)
+    endif()
+else()
 if(WIN32)
     target_link_libraries(prince mingw32 SDL2main SDL2 SDL2_image)
 elseif(APPLE)
@@ -137,4 +157,5 @@ elseif(PSP) # Linux, *BSD, etc.
 	)
 else()
     	target_link_libraries(prince SDL2 SDL2_image m)
+endif()
 endif()

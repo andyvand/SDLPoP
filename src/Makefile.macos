@@ -10,7 +10,8 @@ BIN = ../prince
 OS      := $(shell uname)
 
 CPPFLAGS += -Wall -D_GNU_SOURCE=1
-CFLAGS += -std=c99 -O2
+CFLAGS += -std=c99 -O2 -arch arm64 -arch x86_64
+LDFLAGS += -arch arm64 -arch x86_64
 
 # SDL3 + SDL3_image is the default backend. Build against SDL2 instead with:
 #   make SDL2=1

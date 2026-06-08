@@ -941,7 +941,7 @@ image_type* decode_image(image_data_type* image_data, dat_pal_type* palette) {
 		}
 		colors[0].r = 0; colors[0].g = 0; colors[0].b = 0;
 		colors[0].a = SDL_ALPHA_TRANSPARENT;
-		SDL_SetPaletteColors(image->format->palette, colors, 0, 16);
+		SDL_SetPaletteColors(SURFACE_PALETTE(image), colors, 0, 16);
 		return image;
 	}
 #else
@@ -978,7 +978,7 @@ image_type* decode_image(image_data_type* image_data, dat_pal_type* palette) {
 	}
 	colors[0].r = 0; colors[0].g = 0; colors[0].b = 0;
 	colors[0].a = SDL_ALPHA_TRANSPARENT;
-	SDL_SetPaletteColors(image->format->palette, colors, 0, 16);
+	SDL_SetPaletteColors(SURFACE_PALETTE(image), colors, 0, 16);
 	return image;
 #endif  /* __GBA__ */
 }
@@ -1052,6 +1052,40 @@ void draw_image_transp(image_type* image,image_type* mask,int xpos,int ypos) {
 // seg009:157E
 int set_joy_mode() {
 	// stub
+#ifdef USE_SDL3
+	// SDL3 dropped the index-based joystick/gamepad/haptic open calls; query the
+	// device lists and open the first one instead.
+	int num_joysticks = 0;
+	SDL_JoystickID* joystick_ids = SDL_GetJoysticks(&num_joysticks);
+	if (num_joysticks < 1) {
+		is_joyst_mode = 0;
+	} else {
+		if (gamecontrollerdb_file[0] != '\0') {
+			SDL_AddGamepadMappingsFromFile(gamecontrollerdb_file);
+		}
+		SDL_JoystickID first = joystick_ids[0];
+		if (SDL_IsGamepad(first)) {
+			sdl_controller_ = SDL_OpenGamepad(first);
+			is_joyst_mode = (sdl_controller_ != NULL) ? 1 : 0;
+		}
+		// Not compatible with the gamepad interface: fall back to the joystick interface.
+		else {
+			sdl_joystick_ = SDL_OpenJoystick(first);
+			is_joyst_mode = 1;
+			using_sdl_joystick_interface = 1;
+		}
+	}
+	if (joystick_ids != NULL) SDL_free(joystick_ids);
+	if (enable_controller_rumble && is_joyst_mode) {
+		int num_haptics = 0;
+		SDL_HapticID* haptic_ids = SDL_GetHaptics(&num_haptics);
+		sdl_haptic = (num_haptics > 0) ? SDL_OpenHaptic(haptic_ids[0]) : NULL;
+		if (sdl_haptic != NULL) SDL_InitHapticRumble(sdl_haptic);
+		if (haptic_ids != NULL) SDL_free(haptic_ids);
+	} else {
+		sdl_haptic = NULL;
+	}
+#else
 	if (SDL_NumJoysticks() < 1) {
 		is_joyst_mode = 0;
 	} else {
@@ -1081,6 +1115,7 @@ int set_joy_mode() {
 	} else {
 		sdl_haptic = NULL;
 	}
+#endif
 
 	is_keyboard_mode = !is_joyst_mode;
 	return is_joyst_mode;
@@ -2258,6 +2293,13 @@ void audio_callback(void* userdata, Uint8* stream_orig, int len_orig) {
 		memset(stream_orig, digi_audiospec->silence, len_orig);
 #else
 #ifdef FAST_FORWARD_RESAMPLE_SOUND
+#ifdef USE_SDL3
+		// SDL3 replaced SDL_AudioCVT with one-shot SDL_ConvertAudioSamples; the
+		// resample is done in sdl2_to_sdl3.c (where the real SDL_AudioSpec lives).
+		compat_SDL_AudioResampleFF(digi_audiospec->format, digi_audiospec->channels,
+			digi_audiospec->freq * audio_speed, digi_audiospec->freq,
+			stream, len, stream_orig, len_orig);
+#else
 		static SDL_AudioCVT cvt;
 		static bool cvt_initialized = false;
 		if (!cvt_initialized) {
@@ -2279,6 +2321,7 @@ void audio_callback(void* userdata, Uint8* stream_orig, int len_orig) {
 		memcpy(stream_orig, cvt.buf, len_orig);
 		free(cvt.buf);
 		cvt.buf = NULL;
+#endif
 #else
 		// Hack: use the beginning of the buffer instead of resampling.
 		memcpy(stream_orig, stream, len_orig);
@@ -2679,6 +2722,10 @@ void init_scaling(void) {
 			int access = is_renderer_targettexture_supported ? SDL_TEXTUREACCESS_TARGET : SDL_TEXTUREACCESS_STREAMING;
 			texture_fuzzy = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB24, access, 320*2, 200*2);
 			SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+#ifdef USE_SDL3
+			// SDL3 ignores SDL_HINT_RENDER_SCALE_QUALITY; set the scale mode per-texture.
+			if (texture_fuzzy != NULL) SDL_SetTextureScaleMode(texture_fuzzy, SDL_SCALEMODE_LINEAR);
+#endif
 		}
 		target_texture = texture_fuzzy;
 	} else if (scaling_type == 2) {
@@ -2686,6 +2733,9 @@ void init_scaling(void) {
 			SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
 			texture_blurry = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 320, 200);
 			SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+#ifdef USE_SDL3
+			if (texture_blurry != NULL) SDL_SetTextureScaleMode(texture_blurry, SDL_SCALEMODE_LINEAR);
+#endif
 		}
 		target_texture = texture_blurry;
 	} else {
@@ -2755,12 +2805,18 @@ void set_gr_mode(byte grmode) {
 		default: break;
 	}
 	renderer_ = SDL_CreateRenderer(window_, -1 , flags | SDL_RENDERER_TARGETTEXTURE);
+#ifdef USE_SDL3
+	// SDL3 removed SDL_GetRendererInfo/SDL_RendererInfo; accelerated renderers
+	// support render targets, so assume it's available.
+	is_renderer_targettexture_supported = true;
+#else
 	SDL_RendererInfo renderer_info;
 	if (SDL_GetRendererInfo(renderer_, &renderer_info) == 0) {
 		if (renderer_info.flags & SDL_RENDERER_TARGETTEXTURE) {
 			is_renderer_targettexture_supported = true;
 		}
 	}
+#endif
 	if (use_integer_scaling) {
 #if SDL_VERSION_ATLEAST(2,0,5) // SDL_RenderSetIntegerScale
 		SDL_RenderSetIntegerScale(renderer_, SDL_TRUE);
@@ -3340,6 +3396,11 @@ bool RGB24_bug_checked = false;
 bool RGB24_bug_affected;
 
 bool RGB24_bug_check(void) {
+#ifdef USE_SDL3
+	// This is an old SDL2-specific SDL_FillRect bug; it does not occur on SDL3
+	// (and test_surface->format->Rmask no longer exists). Never affected.
+	return false;
+#else
 	if (!RGB24_bug_checked) {
 		// Check if the bug occurs in this version of SDL.
 		SDL_Surface* test_surface = SDL_CreateRGBSurface(0, 1, 1, 24, 0, 0, 0, 0);
@@ -3354,10 +3415,11 @@ bool RGB24_bug_check(void) {
 		RGB24_bug_checked = true;
 	}
 	return RGB24_bug_affected;
+#endif
 }
 
 int safe_SDL_FillRect(SDL_Surface* dst, const SDL_Rect* rect, Uint32 color) {
-	if (dst->format->BitsPerPixel == 24 && RGB24_bug_check()) {
+	if (SURFACE_BPP(dst) == 24 && RGB24_bug_check()) {
 		// In the buggy version, SDL_FillRect swaps R and B, so we swap it once more.
 		color = ((color & 0xFF) << 16) | (color & 0xFF00) | ((color & 0xFF0000) >> 16);
 	}
@@ -3434,8 +3496,8 @@ void draw_rect_contours(const rect_type* rect, byte color) {
 	}
 #endif
 	// TODO: handle 24 bit surfaces? (currently, 32 bit surface is assumed)
-	if (current_target_surface->format->BitsPerPixel != 32) {
-		printf("draw_rect_contours: not implemented for %d bit surfaces\n", current_target_surface->format->BitsPerPixel);
+	if (SURFACE_BPP(current_target_surface) != 32) {
+		printf("draw_rect_contours: not implemented for %d bit surfaces\n", SURFACE_BPP(current_target_surface));
 		return;
 	}
 	SDL_Rect dest_rect;
@@ -3446,7 +3508,7 @@ void draw_rect_contours(const rect_type* rect, byte color) {
 		sdlperror("draw_rect_contours: SDL_LockSurface");
 		quit(1);
 	}
-	int bytes_per_pixel = current_target_surface->format->BytesPerPixel;
+	int bytes_per_pixel = SURFACE_BYTESPP(current_target_surface);
 	int pitch = current_target_surface->pitch;
 	byte* pixels = current_target_surface->pixels;
 	int xmin = MIN(dest_rect.x,               current_target_surface->w);
@@ -3596,7 +3658,7 @@ image_type* method_6_blit_img_to_scr(image_type* image,int xpos,int ypos,int bli
 	// Fix the background color of teleport images on SDL_image 2.6.2, where they are loaded as RGBA.
 	// For transparency, paletted images need colorkeying, RGB(A) images need blending.
 	if (blit == blitters_0_no_transp) {
-		if (SDL_ISPIXELFORMAT_INDEXED(image->format->format)) {
+		if (SDL_ISPIXELFORMAT_INDEXED(SURFACE_FMT_ENUM(image))) {
 			SDL_SetColorKey(image, SDL_FALSE, 0);
 			//printf("colorkey = SDL_FALSE\n");
 		} else {
@@ -3605,7 +3667,7 @@ image_type* method_6_blit_img_to_scr(image_type* image,int xpos,int ypos,int bli
 		}
 	}
 	else {
-		if (SDL_ISPIXELFORMAT_INDEXED(image->format->format)) {
+		if (SDL_ISPIXELFORMAT_INDEXED(SURFACE_FMT_ENUM(image))) {
 			SDL_SetColorKey(image, SDL_TRUE, 0);
 			//printf("colorkey = SDL_TRUE\n");
 		} else {
@@ -3635,7 +3697,13 @@ int wait_time[NUM_TIMERS];
 
 
 #ifdef USE_COMPAT_TIMER
+#ifdef USE_SDL3
+// SDL3 changed the timer callback signature to (userdata, timerID, interval).
+Uint32 SDLCALL timer_callback(void *param, SDL_TimerID timerID, Uint32 interval) {
+	(void)timerID;
+#else
 Uint32 timer_callback(Uint32 interval, void *param) {
+#endif
 	SDL_Event event;
 	memset(&event, 0, sizeof(event));
 	event.type = SDL_USEREVENT;
@@ -3719,8 +3787,8 @@ void process_events() {
 		switch (event.type) {
 			case SDL_KEYDOWN:
 			{
-				int modifier = event.key.keysym.mod;
-				int scancode = event.key.keysym.scancode;
+				int modifier = EVENT_KEY_MOD(event);
+				int scancode = EVENT_KEY_SCANCODE(event);
 
 				// Handle these separately, so they won't interrupt things that are usually interrupted by a keypress. (pause, cutscene)
 #ifdef USE_FAST_FORWARD
@@ -3777,7 +3845,10 @@ void process_events() {
 						case SDL_SCANCODE_VOLUMEDOWN:
 						// Why are there two mute key codes?
 						case SDL_SCANCODE_MUTE:
+#ifndef USE_SDL3
+						// SDL3 makes SDL_SCANCODE_AUDIOMUTE an alias of SDL_SCANCODE_MUTE (duplicate case).
 						case SDL_SCANCODE_AUDIOMUTE:
+#endif
 						case SDL_SCANCODE_PAUSE:
 							break;
 
@@ -3821,32 +3892,32 @@ void process_events() {
 			}
 			case SDL_KEYUP:
 				// If Alt was held down from Alt+Tab but now it's released: stop ignoring Tab.
-				if (event.key.keysym.scancode == SDL_SCANCODE_TAB && ignore_tab) ignore_tab = false;
+				if (EVENT_KEY_SCANCODE(event) == SDL_SCANCODE_TAB && ignore_tab) ignore_tab = false;
 
 #ifdef USE_FAST_FORWARD
-				if (event.key.keysym.scancode == SDL_SCANCODE_GRAVE) {
+				if (EVENT_KEY_SCANCODE(event) == SDL_SCANCODE_GRAVE) {
 					init_timer(BASE_FPS); // fast-forward off
 					audio_speed = 1;
 					break;
 				}
 #endif
 
-				key_states[event.key.keysym.scancode] &= ~KEYSTATE_HELD;
+				key_states[EVENT_KEY_SCANCODE(event)] &= ~KEYSTATE_HELD;
 #ifdef USE_MENU
 				// Prevent repeated keystrokes opening/closing the menu as long as the key is held down.
-				if (event.key.keysym.scancode == SDL_SCANCODE_BACKSPACE || event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
+				if (EVENT_KEY_SCANCODE(event) == SDL_SCANCODE_BACKSPACE || EVENT_KEY_SCANCODE(event) == SDL_SCANCODE_ESCAPE) {
 					escape_key_suppressed = false;
 				}
 #endif
 				break;
 			case SDL_CONTROLLERAXISMOTION:
-				if (event.caxis.axis < 6) {
-					joy_axis[event.caxis.axis] = event.caxis.value;
-					if (abs(event.caxis.value) > abs(joy_axis_max[event.caxis.axis]))
-						joy_axis_max[event.caxis.axis] = event.caxis.value;
+				if (EVENT_GP_AXIS(event) < 6) {
+					joy_axis[EVENT_GP_AXIS(event)] = EVENT_GP_VALUE(event);
+					if (abs(EVENT_GP_VALUE(event)) > abs(joy_axis_max[EVENT_GP_AXIS(event)]))
+						joy_axis_max[EVENT_GP_AXIS(event)] = EVENT_GP_VALUE(event);
 
 #ifdef USE_AUTO_INPUT_MODE
-					if (!is_joyst_mode && (event.caxis.value >= joystick_threshold || event.caxis.value <= -joystick_threshold)) {
+					if (!is_joyst_mode && (EVENT_GP_VALUE(event) >= joystick_threshold || EVENT_GP_VALUE(event) <= -joystick_threshold)) {
 						is_joyst_mode = 1;
 						is_keyboard_mode = 0;
 					}
@@ -3854,7 +3925,7 @@ void process_events() {
 				}
 				break;
 			case SDL_CONTROLLERDEVICEADDED:
-				SDL_GameControllerOpen(event.cdevice.which);
+				SDL_GameControllerOpen(EVENT_GP_WHICH(event));
 				if (gamecontrollerdb_file[0] != '\0') {
 					SDL_GameControllerAddMappingsFromFile(gamecontrollerdb_file);
 				}
@@ -3862,23 +3933,23 @@ void process_events() {
 				using_sdl_joystick_interface = 0;
 				break;
 			case SDL_CONTROLLERDEVICEREMOVED:
-				if (sdl_controller_ == SDL_GameControllerFromInstanceID(event.cdevice.which)) {
+				if (sdl_controller_ == SDL_GameControllerFromInstanceID(EVENT_GP_WHICH(event))) {
 					sdl_controller_ = NULL;
 					is_joyst_mode = 0;
 					is_keyboard_mode = 1;
 				}
-				SDL_GameControllerClose(SDL_GameControllerFromInstanceID(event.cdevice.which));
+				SDL_GameControllerClose(SDL_GameControllerFromInstanceID(EVENT_GP_WHICH(event)));
 				break;
 			case SDL_CONTROLLERBUTTONDOWN:
 				//Make sure sdl_controller_ always points to the active controller
-				sdl_controller_ = SDL_GameControllerFromInstanceID(event.cdevice.which);
+				sdl_controller_ = SDL_GameControllerFromInstanceID(EVENT_GP_WHICH(event));
 #ifdef USE_AUTO_INPUT_MODE
 				if (!is_joyst_mode) {
 					is_joyst_mode = 1;
 					is_keyboard_mode = 0;
 				}
 #endif
-				switch (event.cbutton.button)
+				switch (EVENT_GP_BUTTON(event))
 				{
 					case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  joy_button_states[JOYINPUT_DPAD_LEFT] |= KEYSTATE_HELD | KEYSTATE_HELD_NEW; break; // left
 					case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: joy_button_states[JOYINPUT_DPAD_RIGHT] |= KEYSTATE_HELD | KEYSTATE_HELD_NEW; break; // right
@@ -3892,9 +3963,9 @@ void process_events() {
 
 					case SDL_CONTROLLER_BUTTON_START:
 					case SDL_CONTROLLER_BUTTON_BACK:
-						if(event.cbutton.button == SDL_CONTROLLER_BUTTON_START)
+						if(EVENT_GP_BUTTON(event) == SDL_CONTROLLER_BUTTON_START)
 							joy_button_states[JOYINPUT_START] |= KEYSTATE_HELD | KEYSTATE_HELD_NEW;
-						else if(event.cbutton.button == SDL_CONTROLLER_BUTTON_BACK)
+						else if(EVENT_GP_BUTTON(event) == SDL_CONTROLLER_BUTTON_BACK)
 							joy_button_states[JOYINPUT_BACK] |= KEYSTATE_HELD | KEYSTATE_HELD_NEW;
 #ifdef USE_MENU
 						last_key_scancode = SDL_SCANCODE_BACKSPACE;  /*** bring up pause menu ***/
@@ -3907,7 +3978,7 @@ void process_events() {
 				}
 				break;
 			case SDL_CONTROLLERBUTTONUP:
-				switch (event.cbutton.button)
+				switch (EVENT_GP_BUTTON(event))
 				{
 					case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  joy_button_states[JOYINPUT_DPAD_LEFT] &= ~KEYSTATE_HELD; break; // left
 					case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: joy_button_states[JOYINPUT_DPAD_RIGHT] &= ~KEYSTATE_HELD; break; // right
@@ -3983,6 +4054,32 @@ void process_events() {
 				}
 
 				break;
+#ifdef USE_SDL3
+			// SDL3 has no SDL_WINDOWEVENT wrapper: window events are top-level types.
+#ifdef __amigaos4__
+			case SDL_EVENT_WINDOW_MINIMIZED: /* pause game */
+				if (!is_menu_shown) {
+					last_key_scancode = SDL_SCANCODE_BACKSPACE;
+				}
+				break;
+			case SDL_EVENT_WINDOW_RESTORED: /* show "game paused/menu" */
+				update_screen();
+				break;
+#endif
+			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+				window_resized();
+				// fallthrough!
+			case SDL_EVENT_WINDOW_EXPOSED:
+				update_screen();
+				break;
+			case SDL_EVENT_WINDOW_FOCUS_GAINED:
+			// Fix for this bug: When playing back a recording, Alt+Tabbing back to SDLPoP stops the replay if Alt is released before Tab.
+			{ // If Alt is held down from Alt+Tab: ignore it until it's released.
+				const bool *state = SDL_GetKeyboardState(NULL);
+				if (state[SDL_SCANCODE_TAB]) ignore_tab = true;
+			}
+			break;
+#else
 			case SDL_WINDOWEVENT:
 				// In case the user switches away while holding a key: do as if all keys were released.
 				// (DOSBox does the same.)
@@ -4027,6 +4124,7 @@ void process_events() {
 					break;
 				}
 				break;
+#endif
 			case SDL_USEREVENT:
 				if (event.user.code == userevent_TIMER /*&& event.user.data1 == (void*)timer_index*/) {
 #ifdef USE_COMPAT_TIMER
@@ -4520,7 +4618,7 @@ void set_chtab_palette(chtab_type* chtab, byte* colors, int n_colors) {
 			if (current_image != NULL) {
 
 				int n_colors_to_be_set = n_colors;
-				SDL_Palette* current_palette = current_image->format->palette;
+				SDL_Palette* current_palette = SURFACE_PALETTE(current_image);
 
 				// Fix crashing with the guard graphics of Christmas of Persia.
 				if (current_palette != NULL) {

@@ -522,8 +522,14 @@ void check_quick_op() {
 
 #endif // USE_QUICKSAVE
 
+#ifdef USE_SDL3
+// SDL3 changed the timer callback signature to (userdata, timerID, interval).
+Uint32 SDLCALL temp_shift_release_callback(void *param, SDL_TimerID timerID, Uint32 interval) {
+	(void)param; (void)timerID; (void)interval;
+#else
 Uint32 temp_shift_release_callback(Uint32 interval, void *param) {
-	const Uint8* state = SDL_GetKeyboardState(NULL);
+#endif
+	const KEYSTATE_PTR_T* state = SDL_GetKeyboardState(NULL);
 	if (state[SDL_SCANCODE_LSHIFT]) key_states[SDL_SCANCODE_LSHIFT] |= KEYSTATE_HELD | KEYSTATE_HELD_NEW;
 	if (state[SDL_SCANCODE_RSHIFT]) key_states[SDL_SCANCODE_RSHIFT] |= KEYSTATE_HELD | KEYSTATE_HELD_NEW;
 	return 0; // causes the timer to be removed
@@ -2376,7 +2382,7 @@ void load_title_images(int bgcolor) {
 			color.a = 0xFF;
 		}
 		if (NULL != chtab_title40) {
-			SDL_SetPaletteColors(chtab_title40->images[0]->format->palette, &color, 14, 1);
+			SDL_SetPaletteColors(SURFACE_PALETTE(chtab_title40->images[0]), &color, 14, 1);
 		}
 	} else if (graphics_mode == gmEga || graphics_mode == gmTga) {
 		// ...
