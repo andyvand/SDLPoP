@@ -31,11 +31,11 @@ extern "C" {
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/stat.h>
 #include <stdint.h>
 #include <stdbool.h>
 

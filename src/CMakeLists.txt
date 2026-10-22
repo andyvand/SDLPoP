@@ -5,7 +5,16 @@ project(SDLPoP)
 # build against SDL2 + SDL2_image instead.
 option(USE_SDL3 "Build against SDL3 instead of SDL2" ON)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -std=c99")
+# DJGPP (MS-DOS) cross build: configure with
+#   cmake -DCMAKE_TOOLCHAIN_FILE=/usr/local/i686-pc-msdosdjgpp/scripts/i686-pc-msdosdjgpp.cmake ..
+# DJGPP's libc headers hide every POSIX symbol (struct stat, dirent, strdup,
+# access, ...) when __STRICT_ANSI__ is set, which -std=c99 does, so the DOS
+# build uses the GNU dialect instead.
+if (DJGPP)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -std=gnu99")
+else()
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -std=c99")
+endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror=implicit-function-declaration")
 
@@ -127,6 +136,11 @@ if(USE_SDL3)
         target_link_libraries(prince mingw32 SDL3 SDL3_image)
     elseif(APPLE)
         target_link_libraries(prince SDL3 SDL3_image m)
+    elseif(DJGPP)
+        # Static libs from the DJGPP sysroot; the compiler's default include
+        # path already covers <SDL3/*.h>. Don't use pkg-config here: it would
+        # pick up the host's SDL3 instead of the cross one.
+        target_link_libraries(prince SDL3_image SDL3 png z m)
     else() # Linux, *BSD, etc.
         include(FindPkgConfig)
         pkg_search_module(SDL3 REQUIRED sdl3)

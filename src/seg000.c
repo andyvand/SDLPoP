@@ -20,6 +20,7 @@ The authors of this program may be contacted at https://forum.princed.org
 
 #include "common.h"
 #include <setjmp.h>
+#include <stdlib.h>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #ifndef M_PI
@@ -2534,7 +2535,8 @@ void show_splash() {
 const char* get_writable_file_path(char* custom_path_buffer, size_t max_len, const char* file_name) {
 	// If the SDLPOP_SAVE_PATH environment variable is set, put all saves into the directory it points to.
 	// Otherwise, save to the home directory
-#if defined WIN32 || _WIN32 || WIN64 || _WIN64
+#if defined WIN32 || _WIN32 || WIN64 || _WIN64 || defined __DJGPP__
+	// DOS: no HOME directory; saves go next to the executable unless overridden.
 	const char* save_path = getenv("SDLPOP_SAVE_PATH");
 #else
 	char save_path[POP_MAX_PATH];

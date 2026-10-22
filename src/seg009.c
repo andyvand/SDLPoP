@@ -44,7 +44,7 @@ void sdlperror(const char* header) {
 
 char exe_dir[POP_MAX_PATH] = ".";
 bool found_exe_dir = false;
-#if ! (defined WIN32 || _WIN32 || WIN64 || _WIN64)
+#if ! (defined WIN32 || _WIN32 || WIN64 || _WIN64 || defined __DJGPP__)
 char home_dir[POP_MAX_PATH];
 bool found_home_dir = false;
 char share_dir[POP_MAX_PATH];
@@ -77,7 +77,7 @@ void find_exe_dir(void) {
 	found_exe_dir = true;
 }
 
-#if ! (defined WIN32 || _WIN32 || WIN64 || _WIN64)
+#if ! (defined WIN32 || _WIN32 || WIN64 || _WIN64 || defined __DJGPP__)
 void find_home_dir(void) {
 	if (found_home_dir) return;
 	const char* home_path = getenv("HOME");
@@ -100,7 +100,7 @@ bool file_exists(const char* filename) {
 
 const char* find_first_file_match(char* dst, int size, char* format, const char* filename) {
 	find_exe_dir();
-#if defined WIN32 || _WIN32 || WIN64 || _WIN64
+#if defined WIN32 || _WIN32 || WIN64 || _WIN64 || defined __DJGPP__
 	snprintf_check(dst, size, format, exe_dir, filename);
 #else
 	find_home_dir();
@@ -117,7 +117,7 @@ const char* find_first_file_match(char* dst, int size, char* format, const char*
 
 const char* locate_save_file_(const char* filename, char* dst, int size) {
 	find_exe_dir();
-#if defined WIN32 || _WIN32 || WIN64 || _WIN64
+#if defined WIN32 || _WIN32 || WIN64 || _WIN64 || defined __DJGPP__
 	snprintf_check(dst, size, "%s/%s", exe_dir, filename);
 #else
 	find_home_dir();
